@@ -1,0 +1,915 @@
+\begin{center}
+\textbf{R CODES}
+\end{center}
+\vspace*{-0.6cm}
+\singlespacing
+    
+\newline 
+library(skimr)
+library(MLeval)
+library(mice)
+library(VIM)
+library(mice)
+library(base)
+library(PerformanceAnalytics)
+library(corrplot)
+library(plyr)
+library(dplyr)
+library(base)
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+require(ggplot2)
+require(gridExtra)
+library(GGally)
+library(ggcorrplot)
+library(lattice)
+library(latticeExtra)
+library(plyr)
+library(psych)
+
+
+
+#A. Place data into another 
+dat= completedData 
+dat[,9]=factor(completedData$Outcome)
+#PRE PROCESS 
+#hot encode dummy variables 
+#dat%>% mutate(value = 1)  %>% spread(agebreak, value,  fill = 0 ) ->dat  DO NOT NEED AGE BREAK 
+preproc1 <- preProcess(dat[,c(1:8)], method=c("center", "scale"))
+
+ 
+norm1 <- predict(preproc1, dat[,c(1:8)])
+ Outcome= dat[,9]
+norm1=cbind(norm1, Outcome)
+ 
+summary(norm1)
+head(norm1)
+
+#SPLIT TRAIN AND TEST
+split <- rsample::initial_split(norm1, strata = Outcome, prop = 4/5)
+train1 <- rsample::training(split) #consisting of 616 observations
+test1 <- rsample::testing(split)#consisting of 152 observations
+
+# split1=split %>%
+set.seed(3)
+balanced.data=SMOTE(Outcome ~., train1, perc.over = 100, k = 5, perc.under = 200) 
+#CONSISTING OF 860 NOW TRAINING SET: 430-0 and 430-1 
+```
+
+# RECIPE FOR RANDOM FOREST balanced data 
+```{r}
+
+set.seed(777)
+tree_rec <- recipe(Outcome ~., data = balanced.data) 
+tree_prep <- prep(tree_rec) 
+juiced <- juice(tree_prep) #data of balanced data 
+
+# 10 fold Cross validation OF TRAINING SET (BALANCED.DATA) re-samples to use for retuning 
+set.seed(56879)
+doParallel::registerDoParallel()
+CV= vfold_cv(balanced.data, strata=Outcome) #for training used in tree_res
+#CV each fold has 774 for training and 86 for testing, 10 folds
+
+#RANGER MODEL
+tune_spec <- rand_forest(
+  mtry = tune(), #The number of predictors that will be randomly sampled at each split when creating the tree models.
+  trees = 100, #try 100 trees 
+  min_n = tune()) %>%  #The minimum number of data points in a node that are required for the node to be split further.
+ set_mode("classification") %>%
+  set_engine("ranger")
+
+
+tune_wf <- workflow() %>%
+  add_recipe(tree_rec) %>%
+  add_model(tune_spec)
+set.seed(78)
+doParallel::registerDoParallel()
+tune_res = tune_grid( tune_wf,resamples = CV, grid = 20)
+#train a bunch of models 
+#grid=20 means? 
+
+```
+
+
+Random Forest Balanced
+```{r}
+tune_res %>%  #TAKES IN THE CV 
+  collect_metrics() %>%
+  filter(.metric == "roc_auc") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"   #differnt combinations? 
+    ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "AUC")+
+ theme(legend.position="none") +theme(axis.text.y  = element_text(vjust=0.5, size=15), 
+                        axis.title.x = element_text(face="bold", size=14),
+                        axis.title.y = element_text(face="bold", size=14), 
+                        axis.text.x  = element_text( vjust=0.8, size=14))
+#lower values of min_n and higher values of mtry 
+#what is min_n and mtry 
+#what is AUC? 
+tune_res %>%
+  collect_metrics() %>%
+  filter(.metric == "roc_auc") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_point() +
+  labs(y = "AUC")+theme(legend.text=element_text(size=14) )+theme(axis.text.y  = element_text(vjust=0.5, size=15), 
+                        axis.title.x = element_text(face="bold", size=14),
+                        axis.title.y = element_text(face="bold", size=14), 
+                       axis.text.x  = element_text( vjust=0.8, size=14)
+                       )
+
+
+tune_res %>%
+  collect_metrics() %>%
+  filter(.metric == "roc_auc") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "AUC")
+
+
+#tuning hyperparameters 
+
+rf_grid <- grid_regular(
+   min_n(range = c(2, 20)),
+   mtry(range = c(2, 5)),
+  levels = 5
+)
+
+
+rf_grid
+
+set.seed(415)
+regular_res <- tune_grid(
+  tune_wf,
+  resamples = CV,
+  grid = rf_grid
+)
+regular_res %>%
+  collect_metrics() %>%
+  filter(.metric == "roc_auc") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "AUC")+theme(legend.text=element_text(size=14)) +theme(axis.text.y  = element_text(vjust=0.5, size=15), 
+                        axis.title.x = element_text(face="bold", size=14),
+                        axis.title.y = element_text(face="bold", size=14), 
+                       axis.text.x  = element_text( vjust=0.8, size=14))
+
+
+best_auc <- select_best(regular_res, metric = "roc_auc")  #min_n (4)and mtry (8)
+final_rf_bal=  finalize_model(
+  tune_spec,
+  best_auc
+)
+
+#Variable Importance 
+library(vip)
+final_rf_bal %>%
+  set_engine("ranger", importance = "permutation") %>%
+  fit(Outcome ~ .,
+    data = juice(tree_prep)) %>% 
+  vip(geom = "point")
+
+
+final_rf_bal %>%
+  set_engine("ranger", importance = "permutation") %>%
+  fit(Outcome ~ .,
+    data = juice(tree_prep)) %>% 
+  importanc
+
+
+#Finds workflow
+balfinal_rfwf <- workflow() %>%
+  add_recipe(tree_rec) %>%
+  add_model(final_rf_bal)
+
+
+#On original training/ testing set
+final_res_bal <- balfinal_rfwf %>%
+  last_fit(split) #which is only 768 observations 
+
+final_res_bal %>%
+  collect_metrics()
+##### ROC 
+ final_res_bal%>%collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(Outcome, .pred_0)  %>% 
+  mutate(model = "Balanced Random Forest")->bal.rf
+
+bind_rows(bal.rf, non.bal.RF) %>% 
+ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)
+
+
+final_res_bal %>%
+  collect_predictions() %>%
+  mutate(correct = case_when(
+    Outcome == .pred_class ~ "Correct",
+    TRUE ~ "Incorrect"
+  )) %>%
+  bind_cols(test1) %>%
+  ggplot(aes(Age, Glucose, color = correct)) +
+  geom_point(size = 0.75, alpha = 0.75) +
+  labs(color = NULL) +
+scale_color_manual(values = c("black", "red"))+theme(legend.text=element_text(size=14)) 
+resf1=final_res_bal %>%
+  collect_predictions()
+predicted=resf1$.pred_class
+out= resf1$Outcome
+
+#consfusion matrix
+library(caret)
+  rand.forest.conf_bal<-confusionMatrix(predicted, out)
+
+
+```
+
+#Logistic Regression Balanced
+```{r}
+
+#Test and train 
+
+#train with ten-fold 
+#repeated 10 fold cross validation 
+set.seed(65333)
+cv_train=  vfold_cv(balanced.data,10)
+#test 1 still the testing 
+log_mod <- 
+  logistic_reg() %>%
+  set_engine(engine = "glm")%>% 
+  set_args(penalty = tune(), mixture = tune())
+#workflow : 
+wf <- workflow() %>%
+  add_formula(Outcome ~.)
+
+#model specfications 
+glm_spec <- logistic_reg() %>%
+  set_engine("glm")
+
+#REPREATED
+#fit logistic regression 
+  glm_ballog <- wf %>%
+  add_model(glm_spec) %>%
+  fit_resamples(
+    resamples =cv_train , ####balanced data
+    control = control_resamples(save_pred = TRUE)
+    )
+glm_ballog
+# finalize wf 
+
+final.log.b <-wf %>%
+  add_model(log_mod) %>%
+  last_fit(split) #use the testing and get results 
+
+collect_metrics(final.log.b)
+#log odds ratio 
+final.log.b$.workflow[[1]] %>%
+  tidy(exponentiate = TRUE)
+#confusion matrix # calculate specificity and sensitivity 
+f.bal.log=final.log.b %>%
+  collect_predictions()
+bl.predicted=f.bal.log$.pred_class
+bl.out= f.bal.log$Outcome
+
+#consfusion matrix
+library(caret)
+bal_lg<-confusionMatrix(bl.predicted, bl.out)
+#variable importance 
+
+
+
+
+#ROC CURVE 
+## run MLeval
+
+final.log.b %>%
+  collect_predictions() %>%
+  roc_curve(Outcome, .pred_0) %>% 
+  mutate(model = "Balanced Logistic Regression") ->bal.LR.fin
+
+ 
+ #Binded ROC CURVE Logistic regression
+ bind_rows(bal.LR.fin, non.LR.fin) %>% 
+ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)
+ 
+
+
+ 
+```
+
+BOOST with balanced
+```{r}
+
+set.seed(71334)
+
+#Step 3: Splitting for Cross Validation: splitting the training into folds
+#vb_folds <- vfold_cv(balanced.data[,-c(10)], strata = Outcome)
+#each fold consists of 774 training and 86 hold out 
+
+# XGBoost model specification will do some tuning here 
+xgb_spec <- boost_tree(
+  trees = 100, 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+ sample_size = tune(),
+  mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+##Grid 
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), balanced.data),#was balanced.data
+  learn_rate(),
+  size = 30
+)
+
+xgb_grid
+
+
+#define the workflow 
+xgb_wf <- workflow() %>%
+  add_formula(Outcome ~ .) %>%
+  add_model(xgb_spec)
+
+xgb_wf
+
+#TUNE THE MODEL 
+
+# hyperparameter tuning
+doParallel::registerDoParallel()
+
+set.seed(183378)
+xgb_res <- tune_grid(
+  xgb_wf,
+  resamples = CV,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+collect_metrics(xgb_res)
+
+xgb_res %>%
+  collect_metrics() %>%
+  filter(.metric == "roc_auc") %>%
+  select(mean, mtry:sample_size) %>%
+  pivot_longer(mtry:sample_size,
+               values_to = "value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "AUC") +theme(axis.text.y  = element_text(vjust=0.5, size=15), 
+                        axis.title.x = element_text(face="bold", size=14),
+                        axis.title.y = element_text(face="bold", size=14), 
+                        axis.text.x  = element_text( vjust=0.8, size=14))
+
+#for the purpose of making a table
+roc.gradient<-show_best(xgb_res, "roc_auc")
+roc.gradient[4:6]=round(roc.gradient[,4:6],4)
+write.csv(roc.gradient, file="roc.gradient.csv")
+
+
+best_auc <- select_best(xgb_res, "roc_auc")
+best_auc
+#finalize the best tuning parameters 
+finalize_xgb <- finalize_workflow(
+  xgb_wf,
+  best_auc
+)
+library(vip)
+
+finalize_xgb %>%
+  fit(data = train1) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point")
+
+
+
+
+finalize_xgb
+#STEP 8 Evaluate Perfomance on TEST DATA 
+final_res<-last_fit(finalize_xgb,split)
+
+final_res %>%
+  collect_predictions() %>%
+  roc_curve(Outcome, .pred_0) %>%
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_line(size = 1.5, color = "midnightblue") +
+  geom_abline(
+    lty = 2, alpha = 0.5,
+    color = "gray50",
+    size = 1.2
+  )
+
+
+xgboost.prediction=final_res %>%
+  collect_predictions()
+predicted=xgboost.prediction$.pred_class
+out= xgboost.prediction$Outcome
+
+#consfusion matrix
+library(caret)
+xgboos_conf_bal<-confusionMatrix(out, predicted)
+
+
+final_res %>%
+  collect_predictions() %>%
+  roc_curve(Outcome, .pred_0) %>% 
+  mutate(model = "Balanced XGBOOST Regression") ->bal.XG
+
+
+```
+
+SVM Balanced
+```{r}
+
+ svm_sp<-svm_rbf(cost = 0.5) %>%
+  set_engine("kernlab") %>%
+  set_mode("classification")
+ 
+ workflow <- workflow() %>%
+  add_recipe(recipe)
+
+ #fit the support vector machine model.
+ set.seed(2311245)
+svm_mod<- wf %>%
+  add_model(svm_sp) %>%
+  fit_resamples(
+    resamples = CV,
+    metrics = metric_set(roc_auc, accuracy, sens, spec),
+    control = control_grid(save_pred = TRUE)
+  )
+ 
+ 
+collect_metrics(svm_mod)
+
+conf_mat_resampled(svm_mod)
+
+
+# testing data 
+svm_balfinal <- workflow %>%
+  add_model(svm_sp) %>%
+  last_fit(split)
+
+
+
+svm.bal=svm_balfinal %>%
+  collect_predictions()
+bal.svm.predicted=svm.bal$.pred_class
+bal.svm.out= svm.bal$Outcome
+#consfusion matrix
+library(caret)
+bal.svm<-confusionMatrix(bal.svm.out,bal.svm.predicted)
+
+svm_balfinal%>%collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(Outcome, .pred_0)  %>% 
+  mutate(model = "Balanced SVM")->bal.SVM.roc
+
+
+bind_rows(bal.SVM.roc,non.bal.SVM  ) %>% 
+ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)
+
+
+
+```
+
+UNBALANCED BOOST SCALED
+```{r}
+set.seed(789890)
+######Train1 is the unbalanced training data 
+#Step 3: Splitting for Cross Validation: splitting the training into folds
+#vb_folds_non <- vfold_cv(train1[,-c(10)], strata = Outcome)
+
+
+# XGBoost model specification will do some tuning here 
+xgb_spec <- boost_tree(
+  trees = 100, 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+ sample_size = tune(),
+  mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+##Grid 
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), train1),
+  learn_rate(),
+  size = 30
+)
+
+xgb_grid
+
+
+#define the workflow 
+xgb_wf <- workflow() %>%
+  add_formula(Outcome ~ .) %>%
+  add_model(xgb_spec)
+
+xgb_wf
+
+#TUNE THE MODEL 
+
+# hyperparameter tuning
+doParallel::registerDoParallel()
+
+set.seed(37451)
+xgb_res <- tune_grid(
+  xgb_wf,
+  resamples = cv,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+collect_metrics(xgb_res)
+
+xgb_res %>%
+  collect_metrics() %>%
+  filter(.metric == "roc_auc") %>%
+  select(mean, mtry:sample_size) %>%
+  pivot_longer(mtry:sample_size,
+               values_to = "value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "AUC") +theme(axis.text.y  = element_text(vjust=0.5, size=15), 
+                        axis.title.x = element_text(face="bold", size=14),
+                        axis.title.y = element_text(face="bold", size=14), 
+                        axis.text.x  = element_text( vjust=0.8, size=14))
+
+#for the purpose of making a table
+roc.gradient<-show_best(xgb_res, "roc_auc")
+roc.gradient[4:6]=round(roc.gradient[,4:6],4)
+
+
+best_auc <- select_best(xgb_res, "roc_auc")
+best_auc
+#finalize the best tuning parameters 
+finalize_xgb <- finalize_workflow(
+  xgb_wf,
+  best_auc
+)
+library(vip)
+
+
+
+finalize_xgb %>%
+  fit(data = train1) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point")
+
+finalize_xgb
+#STEP 8 Evaluate Perfomance on TEST DATA 
+final_res<-last_fit(finalize_xgb,split)
+
+final_res %>%
+  collect_predictions() %>%
+  roc_curve(Outcome, .pred_0) %>%
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_line(size = 1.5, color = "midnightblue") +
+  geom_abline(
+    lty = 2, alpha = 0.5,
+    color = "gray50",
+    size = 1.2
+  )
+
+
+xgboost.prediction=final_res %>%
+  collect_predictions()
+predicted=xgboost.prediction$.pred_class
+out= xgboost.prediction$Outcome
+
+#consfusion matrix
+library(caret)
+non_xgboos_conf_bal<-confusionMatrix(out, predicted)
+
+######ROC CURVE OF THE BOTH 
+final_res %>%
+  collect_predictions() %>%
+  roc_curve(Outcome, .pred_0) %>% 
+  mutate(model = "Non-balancedBalanced XGBOOST Regression") ->non.bal.XG
+
+bind_rows(bal.XG, non.bal.XG) %>% 
+ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)
+```
+
+
+
+
+#Unbalanced (NO SMOTE) : Logistic Regression, Random Forest, XGBoosting, SVM 
+```{r}
+
+set.seed(7145)
+
+#This is scaled 
+doParallel::registerDoParallel()
+set.seed(45167)
+cv= vfold_cv(train1, strata=Outcome) 
+#for training : inside training set there is a 10 fold 
+####NEED TO SCALE EVERYTHING 
+recipe <- recipe(Outcome ~ ., data = train1) 
+preparation <- prep(recipe) 
+juiced <- juice(preparation) #data of non balanced data 
+
+
+######################################RANDOM FOREST ###############
+
+
+tune_spec <- rand_forest(
+  mtry = tune(), #The number of predictors that will be randomly sampled at each split when creating the tree models.
+  trees = 100, #try 100 trees 
+  min_n = tune()) %>%  #The minimum number of data points in a node that are required for the node to be split further.
+ set_mode("classification") %>%
+  set_engine("ranger")
+
+tune_wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(tune_spec)
+
+set.seed(78909)
+doParallel::registerDoParallel()
+resamples = tune_grid( tune_wf,resamples = cv, grid = 20)
+#train a bunch of models 
+#grid=20 means? 
+
+resamples %>%  #TAKES IN THE CV 
+  collect_metrics() %>%
+  filter(.metric == "roc_auc") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"   #differnt combinations
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "AUC") +theme(axis.text.y  = element_text(vjust=0.5, size=15), 
+                        axis.title.x = element_text(face="bold", size=14),
+                        axis.title.y = element_text(face="bold", size=14), 
+                        axis.text.x  = element_text( vjust=0.8, size=14))
+#lower values of min_n and higher values of mtry 
+
+resamples %>%
+  collect_metrics() %>%
+  filter(.metric == "roc_auc") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_point() +
+  labs(y = "AUC")+theme(axis.text.y  = element_text(vjust=0.5, size=15), 
+                        axis.title.x = element_text(face="bold", size=14),
+                        axis.title.y = element_text(face="bold", size=14), 
+                        axis.text.x  = element_text( vjust=0.8, size=14))
+
+
+resamples %>%
+  collect_metrics() %>%
+  filter(.metric == "roc_auc") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "AUC")
+#tuning hyperparameters 
+set.seed(2535)
+rf.grid.nonbalanced <- grid_regular(
+  mtry(range = c(1, 5)),
+  min_n(range = c(20, 40)),
+  levels = 5
+)
+
+
+rf.grid.nonbalanced
+###Better tuning 
+set.seed(17392)
+tuning <- tune_grid(
+  tune_wf,
+  resamples = cv,
+  grid = rf.grid.nonbalanced
+)
+tuning %>%
+  collect_metrics() %>%
+  filter(.metric == "roc_auc") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+labs(y = "AUC")+theme(axis.text.y  = element_text(vjust=0.5, size=15), 
+                        axis.title.x = element_text(face="bold", size=14),
+                        axis.title.y = element_text(face="bold", size=14), 
+                        axis.text.x  = element_text( vjust=0.8, size=14))
+
+
+param_auc <- select_best(tuning, metric = "roc_auc")  
+
+#final specification 
+non_final_rf=  finalize_model(
+  tune_spec,
+  param_auc)
+
+#final workflow 
+non.final_wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(non_final_rf)
+
+
+#Variable Importance 
+library(vip)
+non_final_rf %>%
+  set_engine("ranger", importance = "permutation") %>%
+  fit(Outcome ~ .,
+    data = juice(preparation)) %>% 
+  vip(geom = "point")
+
+#On original training/ testing set
+non.final_resample <-non.final_wf %>%
+  last_fit(split)
+
+non.final_resample %>%
+  collect_metrics()
+
+non.final_resample %>%
+  collect_predictions() %>%
+  mutate(correct = case_when(
+    Outcome == .pred_class ~ "Correct",
+    TRUE ~ "Incorrect"
+  )) %>%
+  bind_cols(test1) %>%
+  ggplot(aes(Glucose, BMI, color = correct)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  labs(color = NULL) +
+  scale_color_manual(values = c("black", "red"))
+
+#consfusion matrix
+library(caret)
+non.rf.out=non.final_resample %>%
+  collect_predictions()
+predicted=non.rf.out$.pred_class
+out= non.rf.out$Outcome
+non_bal.rf<-confusionMatrix(predicted, out)
+####ROC 
+ non.final_resample%>%collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(Outcome, .pred_0)  %>% 
+  mutate(model = "Non-balanced Ranfom Forest ")->non.bal.RF
+
+bind_rows(bal.rf, non.bal.RF) %>% 
+ggplot(aes(x = 1 - specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6)
+ 
+
+
+##############################################LOGISTIC MODEL 
+ set.seed(231819)
+  glm.spec= logistic_reg() %>%
+  set_engine("glm")
+
+  #Workflow 
+workflow <- workflow() %>% add_formula(Outcome~. )
+ 
+#resampled lositic regression resamples
+glm.res= workflow %>%
+  add_model(glm.spec) %>%
+  fit_resamples(
+    resamples = cv,
+    control = control_resamples(save_pred = TRUE))
+
+#######Evaluate the model 
+ collect_metrics(glm.res)
+glm.res %>%
+  conf_mat_resampled()
+ ##CHOOSE GLM  and check ROC curve for Diabetic individuals 
+glm.res %>%
+  collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(Outcome, .pred_0) %>%
+  ggplot(aes(1 - specificity, sensitivity, color = id)) +
+  geom_abline(lty = 2, color = "gray80", size = 1.5) +
+  geom_path(show.legend = FALSE, alpha = 0.6, size = 1.2) +
+  coord_equal()
+#Test the original testing set 
+final.non.log= workflow %>%
+  add_model(glm.spec) %>%
+  last_fit(split)
+ collect_metrics(final.non.log)
+ collect_predictions(final.non.log) %>%
+  conf_mat(Outcome, .pred_class)
+
+#confusion matrix # calculate specificity and sensitivity 
+second=final.non.log %>%
+  collect_predictions()
+lg.predicted=second$.pred_class
+lg.out= second$Outcome
+#consfusion matrix
+library(caret)
+unbalanced.lr<-confusionMatrix(lg.out, lg.predicted)
+
+##ODDS RATIO 
+final.non.log$.workflow[[1]] %>%
+  tidy(exponentiate = TRUE)
+##
+ final.non.log%>%collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(Outcome, .pred_0)  %>% 
+  mutate(model = "Non-balanced Logistic Regression")->non.bal.LR
+ 
+ 
+ 
+ 
+ ##############################################################################
+ 
+ #SVM 
+ svm_spec<-svm_rbf(cost = 0.5) %>%
+  set_engine("kernlab") %>%
+  set_mode("classification")
+ 
+ wf <- workflow() %>%
+  add_recipe(recipe)
+
+ #fit the support vector machine model.
+ set.seed(2345)
+svm_rs <- wf %>%
+  add_model(svm_spec) %>%
+  fit_resamples(
+    resamples = cv,
+    metrics = metric_set(roc_auc, accuracy, sens, spec),
+    control = control_grid(save_pred = TRUE)
+  )
+ 
+ 
+collect_metrics(svm_rs)
+
+conf_mat_resampled(svm_rs)
+
+
+# testing data 
+svm_nonfinal <- wf %>%
+  add_model(svm_spec) %>%
+  last_fit(split)
+
+svm_nonfinal %>%
+  collect_metrics()
+
+
+svm=svm_nonfinal %>%
+  collect_predictions()
+svm.predicted=svm$.pred_class
+svm.out= svm$Outcome
+#consfusion matrix
+library(caret)
+unbalanced.svm<-confusionMatrix(svm.out,svm.predicted)
+
+svm_nonfinal%>%collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(Outcome, .pred_0)  %>% 
+  mutate(model = "Non-balanced SVM")->non.bal.SVM 
+
